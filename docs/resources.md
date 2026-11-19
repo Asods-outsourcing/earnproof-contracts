@@ -5,7 +5,15 @@
 Every contract function with variable-size or collection inputs has documented maximum sizes.
 Inputs exceeding these limits are rejected **before any storage write** (failure atomicity guarantee).
 
+Release-to-release storage growth is modeled separately in the generated
+[storage rent projection report](./storage-rent-projections.md). The report
+uses pinned synthetic encoded sizes and byte-ledgers; it does not replace the
+runtime limits in this document.
+
 This document serves as the authoritative reference for resource boundaries and budget verification.
+
+Checked monotonic counters and their exact maximum-value behavior are
+documented in [Monotonic Sequence Overflow Policy](./sequence-overflow.md).
 
 ---
 

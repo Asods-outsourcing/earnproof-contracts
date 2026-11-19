@@ -10,18 +10,17 @@ use earnproof_shared::{
     ApprovalStatus, ArchivedProofRecord, ConsentWithdrawalRecord, ContractError, DisputeActorClass,
     DisputeFilingAnchor, DisputeFilingEligibility, DisputeFilingPolicy, DisputeFilingStatus,
     DisputeRecord, DisputeStatus, EventDomain, EventSequenceRange, EvidenceBundleCommitment,
-    GenesisRecord, InterfaceVersion,
-    MigrationStatus, PauseAcknowledgementRecord, PauseAcknowledgementRole, PauseScope, ProofError,
-    ProofPayloadRecord, ProofPolicyVersions, ProofRecord, ProofRegistrationInput, ProofStatus,
-    ProofValidity, ProofValidityDetails, SchemaPolicy, SchemaRateLimit, SchemaRateLimitUsage,
-    SubjectNullifier,
-    TtlStatus, UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord,
-    UpgradeHistoryRecord, UpgradeReceipt, ADMIN_TRANSFER_EXPIRY_LEDGERS, CONFIG_DIGEST_VERSION,
+    GenesisRecord, InterfaceVersion, MigrationStatus, PauseAcknowledgementRecord,
+    PauseAcknowledgementRole, PauseScope, ProofError, ProofPayloadRecord, ProofPolicyVersions,
+    ProofRecord, ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails,
+    SchemaPolicy, SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier, TtlStatus,
+    UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord, UpgradeHistoryRecord,
+    UpgradeReceipt, ADMIN_TRANSFER_EXPIRY_LEDGERS, CONFIG_DIGEST_VERSION,
     CONSENT_WITHDRAWAL_REASON_SUBJECT_REQUEST, CONSENT_WITHDRAWAL_VERSION, EVENT_RANGE_VERSION,
-    ISSUER_POLICY_ENCODING_VERSION, MAX_CONSENT_WITHDRAWAL_PAGE, MAX_CONSENT_WITHDRAWAL_REASON,
+    EVIDENCE_BUNDLE_COMMITMENT_VERSION, ISSUER_POLICY_ENCODING_VERSION,
+    LEGACY_COMMITMENT_ALGORITHM, MAX_CONSENT_WITHDRAWAL_PAGE, MAX_CONSENT_WITHDRAWAL_REASON,
     MAX_MIGRATION_BATCH, MAX_PAUSE_ACKNOWLEDGEMENT_HISTORY_PAGE, MAX_PROOF_BATCH_SIZE,
-    EVIDENCE_BUNDLE_COMMITMENT_VERSION, LEGACY_COMMITMENT_ALGORITHM, MIGRATION_STATUS_VERSION,
-    PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
+    MIGRATION_STATUS_VERSION, PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
     TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS,
     UPGRADE_TIMELOCK_LEDGERS,
 };
@@ -1418,9 +1417,7 @@ impl ProofRegistryContract {
             .instance()
             .get(&DataKey::PauseAcknowledgementCount)
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(ContractError::InvalidState);
-        }
+        let next_sequence = sequence.checked_add(1).ok_or(ContractError::InvalidState)?;
         let record = PauseAcknowledgementRecord {
             record_version: 1,
             sequence,
@@ -1435,7 +1432,7 @@ impl ProofRegistryContract {
         env.storage().persistent().set(&history_key, &record);
         env.storage()
             .instance()
-            .set(&DataKey::PauseAcknowledgementCount, &(sequence + 1));
+            .set(&DataKey::PauseAcknowledgementCount, &next_sequence);
         for key in [&hash_key, &history_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -3959,6 +3956,18 @@ impl ProofRegistryContract {
             }
         }
 
+        // Reserve the history index before any upgrade state is changed. A
+        // saturated counter must fail atomically rather than committing the
+        // new version without an indexable history record.
+        let history_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeHistoryCount)
+            .unwrap_or(0);
+        let next_history_count = history_count
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("upgrade history overflow: reached maximum"));
+
         env.storage().persistent().remove(&key);
         env.storage()
             .instance()
@@ -4013,12 +4022,6 @@ impl ProofRegistryContract {
         env.storage().instance().remove(&DataKey::MigrationStatus);
         Self::extend_instance_ttl(env.clone());
 
-        let history_count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeHistoryCount)
-            .unwrap_or(0);
-
         let history_record = UpgradeHistoryRecord {
             old_wasm_hash,
             new_wasm_hash: wasm_hash.clone(),
@@ -4040,7 +4043,7 @@ impl ProofRegistryContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::UpgradeHistoryCount, &(history_count + 1));
+            .set(&DataKey::UpgradeHistoryCount, &next_history_count);
 
         ContractUpgraded {
             new_wasm_hash: wasm_hash,
