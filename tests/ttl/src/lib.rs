@@ -32,6 +32,9 @@ mod expiry;
 #[cfg(test)]
 mod restoration;
 
+#[cfg(test)]
+mod temporary;
+
 /// TTL Expiration and Restoration Boundary Tests
 ///
 /// Comprehensive deterministic tests for TTL (Time-To-Live) boundaries across

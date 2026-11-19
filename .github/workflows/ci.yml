@@ -25,6 +25,10 @@ jobs:
         run: python3 scripts/check-doc-links.py
       - name: Check generated API reference
         run: python3 scripts/generate-reference.py --check
+      - name: Enforce event payload budgets
+        run: |
+          python3 scripts/check-event-payload-budgets.py
+          python3 scripts/check-event-payload-budgets.py --self-test
 
   contracts:
     needs: malware-scan
