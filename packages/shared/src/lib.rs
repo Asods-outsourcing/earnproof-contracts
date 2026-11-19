@@ -1117,6 +1117,9 @@ pub enum ProofError {
     EvidenceBundleAlreadyCommitted = 335,
     /// The proof schema does not permit evidence bundle commitments.
     EvidenceBundlesNotEnabled = 336,
+    /// A mutating batch repeats an identifier already present earlier in the
+    /// same request. Recovery: remove the duplicate and resubmit the batch.
+    DuplicateBatchElement = 337,
 }
 
 /// Versioned asset identifier accepted by context-aware proof registration.
@@ -2286,6 +2289,43 @@ pub struct ProofRegistrationInput {
     pub schema_version: u32,
     pub expires_at: u64,
     pub proof_type: BytesN<32>,
+}
+
+/// Encoding version for bounded batch preflight responses.
+pub const BATCH_VALIDATION_RESULT_VERSION: u32 = 1;
+
+/// Stable, non-sensitive reason codes returned by batch preflight queries.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BatchValidationReason {
+    Empty,
+    TooLarge,
+    DuplicateIdentifier,
+    InvalidSchemaVersion,
+    Expired,
+    UnsupportedSchema,
+    ProofNotFound,
+    ProofAlreadyRevoked,
+}
+
+/// Location and reason for one rejected batch. No input value is echoed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchValidationError {
+    pub version: u32,
+    pub index: u32,
+    /// First occurrence for duplicate identifiers; equal to `index` otherwise.
+    pub related_index: u32,
+    pub reason: BatchValidationReason,
+}
+
+/// Bounded structured preflight result. An enum avoids optional user-defined
+/// values in contract XDR while preserving an explicit valid state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchValidationResult {
+    Valid,
+    Invalid(BatchValidationError),
 }
 
 /// Lifecycle state of a proof dispute. Terminal once `Withdrawn`, `Resolved`,

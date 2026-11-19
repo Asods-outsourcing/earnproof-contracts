@@ -7,6 +7,9 @@ Inputs exceeding these limits are rejected **before any storage write** (failure
 
 This document serves as the authoritative reference for resource boundaries and budget verification.
 
+Structured batch preflight and duplicate semantics are documented in
+[Batch Validation Semantics](./batch-validation.md).
+
 ---
 
 ## Input Size Limits
