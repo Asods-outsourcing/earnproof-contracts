@@ -26,6 +26,32 @@ jobs:
       - name: Check generated API reference
         run: python3 scripts/generate-reference.py --check
 
+  dependency-policy:
+    needs: malware-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.21.0
+      - name: Validate pinned policy inputs and negative fixtures
+        run: |
+          python3 scripts/check-cargo-policy.py
+          python3 scripts/check-cargo-policy.py --self-test
+      - name: Fetch and pin the RustSec advisory database
+        shell: bash
+        run: |
+          cargo deny fetch
+          db_dir="$(find .cargo/advisory-dbs -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          test -n "$db_dir"
+          git -C "$db_dir" checkout --detach "$(cat .cargo/advisory-db-revision)"
+          test "$(git -C "$db_dir" rev-parse HEAD)" = "$(cat .cargo/advisory-db-revision)"
+      - name: Enforce advisory, yanked, license, and source policy
+        run: cargo deny check --disable-fetch advisories bans licenses sources
+
   contracts:
     needs: malware-scan
     runs-on: ubuntu-latest
