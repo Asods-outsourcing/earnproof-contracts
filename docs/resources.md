@@ -12,6 +12,9 @@ runtime limits in this document.
 
 This document serves as the authoritative reference for resource boundaries and budget verification.
 
+Structured batch preflight and duplicate semantics are documented in
+[Batch Validation Semantics](./batch-validation.md).
+
 Checked monotonic counters and their exact maximum-value behavior are
 documented in [Monotonic Sequence Overflow Policy](./sequence-overflow.md).
 
