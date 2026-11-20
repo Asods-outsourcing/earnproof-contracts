@@ -1420,9 +1420,7 @@ impl ProofRegistryContract {
             .instance()
             .get(&DataKey::PauseAcknowledgementCount)
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(ContractError::InvalidState);
-        }
+        let next_sequence = sequence.checked_add(1).ok_or(ContractError::InvalidState)?;
         let record = PauseAcknowledgementRecord {
             record_version: 1,
             sequence,
@@ -1437,7 +1435,7 @@ impl ProofRegistryContract {
         env.storage().persistent().set(&history_key, &record);
         env.storage()
             .instance()
-            .set(&DataKey::PauseAcknowledgementCount, &(sequence + 1));
+            .set(&DataKey::PauseAcknowledgementCount, &next_sequence);
         for key in [&hash_key, &history_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -3987,6 +3985,18 @@ impl ProofRegistryContract {
             }
         }
 
+        // Reserve the history index before any upgrade state is changed. A
+        // saturated counter must fail atomically rather than committing the
+        // new version without an indexable history record.
+        let history_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeHistoryCount)
+            .unwrap_or(0);
+        let next_history_count = history_count
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("upgrade history overflow: reached maximum"));
+
         env.storage().persistent().remove(&key);
         env.storage()
             .instance()
@@ -4041,12 +4051,6 @@ impl ProofRegistryContract {
         env.storage().instance().remove(&DataKey::MigrationStatus);
         Self::extend_instance_ttl(env.clone());
 
-        let history_count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeHistoryCount)
-            .unwrap_or(0);
-
         let history_record = UpgradeHistoryRecord {
             old_wasm_hash,
             new_wasm_hash: wasm_hash.clone(),
@@ -4068,7 +4072,7 @@ impl ProofRegistryContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::UpgradeHistoryCount, &(history_count + 1));
+            .set(&DataKey::UpgradeHistoryCount, &next_history_count);
 
         ContractUpgraded {
             new_wasm_hash: wasm_hash,
