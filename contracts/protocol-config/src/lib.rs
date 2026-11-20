@@ -817,9 +817,7 @@ impl ProtocolConfigContract {
             .instance()
             .get(&DataKey::PauseAcknowledgementCount)
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(ContractError::InvalidState);
-        }
+        let next_sequence = sequence.checked_add(1).ok_or(ContractError::InvalidState)?;
         let record = PauseAcknowledgementRecord {
             record_version: 1,
             sequence,
@@ -834,7 +832,7 @@ impl ProtocolConfigContract {
         env.storage().persistent().set(&history_key, &record);
         env.storage()
             .instance()
-            .set(&DataKey::PauseAcknowledgementCount, &(sequence + 1));
+            .set(&DataKey::PauseAcknowledgementCount, &next_sequence);
         for key in [&hash_key, &history_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -842,7 +840,7 @@ impl ProtocolConfigContract {
                 TTL_EXTEND_TO_LEDGERS,
             );
         }
-        Self::prune_configured_history(&env, HistoryKind::PauseAcknowledgement, sequence + 1);
+        Self::prune_configured_history(&env, HistoryKind::PauseAcknowledgement, next_sequence);
         Self::extend_instance_ttl(env.clone());
         PauseAcknowledged {
             record: record.clone(),
