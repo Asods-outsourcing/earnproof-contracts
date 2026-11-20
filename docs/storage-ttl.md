@@ -89,7 +89,15 @@ the already-renewed TTL unchanged.
 
 ## Key inventory: durability, trigger, and behaviour after expiry
 
-Every key below is either **instance** or **persistent** durability. No contract uses temporary storage, and a test asserts that all three temporary stores stay empty. Instance and persistent entries share the same archival rules, so "restored on access" applies uniformly.
+Every production key below is either **instance** or **persistent** durability.
+No deployed contract uses temporary storage, and a test asserts that all three
+temporary stores stay empty. A test-only probe in
+[`tests/ttl/src/temporary.rs`](../tests/ttl/src/temporary.rs) separately fixes
+the semantics future proposal, nonce, cursor, or coordination entries must
+obey: live before and on the final ledger, absent one ledger later, never
+restored, and never reusable after consumption or expiry. Instance and
+persistent entries share archival rules, so "restored on access" applies to
+those two durability classes only.
 
 ### `protocol-config`
 
@@ -215,3 +223,4 @@ Extension is the operator's job. Nothing in the protocol does it on a schedule.
 | Pre-expiry, final live ledger, first archived ledger, index divergence | [`tests/ttl/src/expiry.rs`](../tests/ttl/src/expiry.rs) |
 | Restoration contents, TTL, cost, authorization, re-registration | [`tests/ttl/src/restoration.rs`](../tests/ttl/src/restoration.rs) |
 | Uninitialized contracts, unknown records, unapproved schemas | [`tests/ttl/src/missing_state.rs`](../tests/ttl/src/missing_state.rs) |
+| Temporary proposal, nonce, cursor, and coordination expiry and replay | [`tests/ttl/src/temporary.rs`](../tests/ttl/src/temporary.rs) |
