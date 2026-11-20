@@ -105,7 +105,7 @@ enum DataKey {
     HistoryRetention(HistoryKind),
 }
 
-// ── admin transfer events ─────────────────────────────────────────────────────────
+// ?? admin transfer events ?????????????????????????????????????????????????????????
 
 #[contractevent]
 pub struct AdminTransferNominated {
@@ -138,7 +138,7 @@ pub struct AdminTransferExpired {
     pub cleaned_at_ledger: u32,
 }
 
-// ── existing events ─────────────────────────────────────────────────────────
+// ?? existing events ?????????????????????????????????????????????????????????
 
 #[contractevent]
 pub struct Initialized {
@@ -379,7 +379,7 @@ pub struct EmergencyActionExecuted {
     pub reason_commitment: BytesN<32>,
 }
 
-// ── upgrade events ───────────────────────────────────────────────────────────
+// ?? upgrade events ???????????????????????????????????????????????????????????
 
 /// Emitted when the admin adds a WASM hash to the upgrade allowlist.
 #[contractevent]
@@ -1031,7 +1031,7 @@ impl ProtocolConfigContract {
         Ok(())
     }
 
-    // ── capability bitmap, storage layout, deployment identity, grace ─────────
+    // ?? capability bitmap, storage layout, deployment identity, grace ?????????
 
     /// Versioned capability report. The bitmap is a constant of the deployed
     /// code; only `contract_version` is read from storage.
@@ -1051,6 +1051,11 @@ impl ProtocolConfigContract {
             PROTOCOL_CONFIG_CAPABILITIES,
             capability,
         )
+    }
+
+    /// This leaf contract has no governed contract dependencies.
+    pub fn get_dependencies(env: Env) -> Vec<Address> {
+        Vec::new(&env)
     }
 
     /// Active storage layout, code layout, pending migration target, and
@@ -1427,7 +1432,7 @@ impl ProtocolConfigContract {
             return Err(ContractError::InvalidInput);
         }
 
-        let existing = Self::stored_predecessor(env.clone(), version);
+        let existing = Self::peek_predecessor(&env, version);
         if existing.is_some_and(|stored| stored != predecessor)
             || (existing.is_none()
                 && predecessor != 0
@@ -1498,7 +1503,7 @@ impl ProtocolConfigContract {
         chain
     }
 
-    // ── commitment hash algorithm registry ────────────────────────────────────
+    // ?? commitment hash algorithm registry ????????????????????????????????????
 
     /// Admin-only: approves a new commitment hash algorithm identifier.
     /// Approval alone does not allow new commitments; see
@@ -2106,10 +2111,10 @@ impl ProtocolConfigContract {
         supported
     }
 
-    // ── schema payload size limits ───────────────────────────────────────────
+    // ?? schema payload size limits ???????????????????????????????????????????
 
     /// Admin-only: set the maximum auxiliary payload size (in bytes) a proof
-    /// registered under `version` may carry. Applies going forward only —
+    /// registered under `version` may carry. Applies going forward only ?
     /// proofs already registered are never re-validated against a changed
     /// limit.
     pub fn set_schema_payload_limit(
@@ -2828,14 +2833,14 @@ impl ProtocolConfigContract {
         limit
     }
 
-    // ── bounded configuration change history ─────────────────────────────────
+    // ?? bounded configuration change history ?????????????????????????????????
 
     /// Returns up to `limit` change-history entries starting at `cursor`
     /// (an absolute, monotonically increasing sequence number; `0` is the
     /// very first change ever recorded).
     ///
     /// If `cursor` refers to an entry the ring has already evicted, the read
-    /// starts at the oldest entry still available rather than erroring — a
+    /// starts at the oldest entry still available rather than erroring ? a
     /// stale cursor is clamped forward, deterministically, instead of
     /// panicking. `limit` is capped at `MAX_CONFIG_HISTORY_PAGE` regardless of
     /// the requested value.
@@ -3099,7 +3104,7 @@ impl ProtocolConfigContract {
             .unwrap_or(0)
     }
 
-    // ── upgrade governance ───────────────────────────────────────────────────
+    // ?? upgrade governance ???????????????????????????????????????????????????
 
     /// Returns the stored monotonic contract version (separate from the
     /// config-mutation counter).  Starts at 1 after `initialize`.
@@ -3270,7 +3275,7 @@ impl ProtocolConfigContract {
         .publish(&env);
     }
 
-    // ── private helpers ──────────────────────────────────────────────────────
+    // ?? private helpers ??????????????????????????????????????????????????????
 
     fn ensure_nonzero_version(version: u32) -> Result<(), ContractError> {
         if version == 0 {
@@ -3722,6 +3727,14 @@ impl ProtocolConfigContract {
         predecessor
     }
 
+    /// Validation-only read. Unlike public observation queries, this never
+    /// changes TTL and therefore keeps rejected mutations fully atomic.
+    fn peek_predecessor(env: &Env, version: u32) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SchemaPredecessor(version))
+    }
+
     fn stored_schema_replacement(env: Env, version: u32) -> Option<SchemaReplacementPointer> {
         let key = DataKey::SchemaReplacement(version);
         let pointer = env.storage().persistent().get(&key);
@@ -3735,6 +3748,12 @@ impl ProtocolConfigContract {
         pointer
     }
 
+    fn peek_schema_replacement(env: &Env, version: u32) -> Option<SchemaReplacementPointer> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SchemaReplacement(version))
+    }
+
     fn replacement_reaches(env: Env, start: u32, target: u32) -> Result<bool, ContractError> {
         let mut current = start;
         let mut visited = Vec::new(&env);
@@ -3746,7 +3765,7 @@ impl ProtocolConfigContract {
                 return Err(ContractError::InvalidState);
             }
             visited.push_back(current);
-            match Self::stored_schema_replacement(env.clone(), current) {
+            match Self::peek_schema_replacement(&env, current) {
                 Some(pointer) => current = pointer.replacement_version,
                 None => return Ok(false),
             }
@@ -3830,7 +3849,7 @@ impl ProtocolConfigContract {
             if current == target {
                 return true;
             }
-            match Self::stored_predecessor(env.clone(), current) {
+            match Self::peek_predecessor(&env, current) {
                 Some(predecessor) => current = predecessor,
                 None => return false,
             }
@@ -4313,13 +4332,13 @@ mod test {
     use earnproof_shared::{
         AdminTransferState, ConfigChangeCategory, ContractError, CriticalAction,
         CriticalActionPolicy, DisputeFilingAnchor, DisputeFilingPolicy, EmergencyAction,
-        EmergencyFastTrackPolicy, GovernanceApprovalEligibility, PauseScope, SchemaRateLimit,
-        ADMIN_TRANSFER_EXPIRY_LEDGERS, CRITICAL_ACTION_APPROVAL_EXPIRY_LEDGERS,
-        DISPUTE_FILING_POLICY_VERSION, GOVERNANCE_ACTION_HASH_VERSION,
-        SCHEMA_POLICY_DIGEST_VERSION, TTL_THRESHOLD_LEDGERS,
+        EmergencyFastTrackPolicy, GovernanceApprovalEligibility, PauseScope, SchemaCompatibility,
+        SchemaRateLimit, SchemaReplacementPointer, ADMIN_TRANSFER_EXPIRY_LEDGERS,
+        CRITICAL_ACTION_APPROVAL_EXPIRY_LEDGERS, DISPUTE_FILING_POLICY_VERSION,
+        GOVERNANCE_ACTION_HASH_VERSION, SCHEMA_POLICY_DIGEST_VERSION, TTL_THRESHOLD_LEDGERS,
     };
     use soroban_sdk::{
-        testutils::{storage::Persistent as _, Address as _, Ledger as _},
+        testutils::{storage::Persistent as _, Address as _, Events as _, Ledger as _},
         Address, BytesN, Env, Vec,
     };
 
@@ -4340,7 +4359,7 @@ mod test {
         (env, client, admin)
     }
 
-    // ── existing tests ────────────────────────────────────────────────────────
+    // ?? existing tests ????????????????????????????????????????????????????????
 
     #[test]
     fn exposes_a_stable_interface_version() {
@@ -4634,7 +4653,7 @@ mod test {
         });
     }
 
-    // ── upgrade governance tests ──────────────────────────────────────────────
+    // ?? upgrade governance tests ??????????????????????????????????????????????
 
     #[test]
     fn approve_and_check_allowlist() {
@@ -4698,7 +4717,7 @@ mod test {
         client.approve_upgrade(&hash, &2);
         env.set_auths(&[]);
 
-        // Attempt upgrade without auth — must panic.
+        // Attempt upgrade without auth ? must panic.
         client.upgrade_contract(&hash);
     }
 
@@ -4707,7 +4726,7 @@ mod test {
     ///
     /// Note: in the test environment `update_current_contract_wasm` is a no-op
     /// (the WASM is not actually swapped) but all surrounding state transitions
-    /// — version bump, allowlist removal, event emission — are fully exercised.
+    /// ? version bump, allowlist removal, event emission ? are fully exercised.
     #[test]
     fn upgrade_contract_advances_version_and_consumes_allowlist() {
         let (env, client, _admin) = setup();
@@ -4736,7 +4755,7 @@ mod test {
 
         client.approve_upgrade(&hash, &2);
         client.upgrade_contract(&hash);
-        // Second application must fail — entry was consumed.
+        // Second application must fail ? entry was consumed.
         client.upgrade_contract(&hash);
     }
 
@@ -4776,7 +4795,7 @@ mod test {
         client.upgrade_contract(&hash_v2);
         assert_eq!(client.get_contract_version(), 2);
 
-        // Attempt to allowlist a hash that would install version 1 — rejected.
+        // Attempt to allowlist a hash that would install version 1 ? rejected.
         client.approve_upgrade(&old_hash, &1);
     }
 
@@ -4793,7 +4812,7 @@ mod test {
         env.mock_all_auths();
         client.initialize(&admin);
 
-        // Only authorize `other`, not `admin` — should panic.
+        // Only authorize `other`, not `admin` ? should panic.
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
             address: &other,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -4810,7 +4829,7 @@ mod test {
         client.approve_upgrade(&BytesN::from_array(&env, &[0xaa; 32]), &2);
     }
 
-    // ── numeric boundary tests ────────────────────────────────────────────────
+    // ?? numeric boundary tests ????????????????????????????????????????????????
 
     /// Table-driven tests for schema version boundaries.
     /// Schema versions must be >= MIN_SCHEMA_VERSION (1).
@@ -4958,7 +4977,7 @@ mod test {
         let config_before = client.get_config_version();
         let approved_before = client.is_schema_version_approved(&999);
 
-        // Attempt to approve version 0 — should panic
+        // Attempt to approve version 0 ? should panic
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.approve_schema_version(&0);
         }));
@@ -5012,7 +5031,7 @@ mod test {
         );
     }
 
-    // ── adversarial initialization tests ───────────────────────────────────────
+    // ?? adversarial initialization tests ???????????????????????????????????????
 
     /// Verify that first initialization writes exactly the documented state
     /// with no partial writes or missing fields.
@@ -5134,7 +5153,7 @@ mod test {
     /// without state or event changes.
     ///
     /// This tests that the re-initialization guard does not discriminate
-    /// based on caller identity — it prevents any re-initialization attempt.
+    /// based on caller identity ? it prevents any re-initialization attempt.
     #[test]
     fn reinitialization_by_different_admin_fails_atomically() {
         let env = Env::default();
@@ -5212,7 +5231,7 @@ mod test {
         );
     }
 
-    /// Verify that the re-initialization guard is truly the only barrier —
+    /// Verify that the re-initialization guard is truly the only barrier ?
     /// the panic message must indicate "already initialized", not a different
     /// validation error.
     #[test]
@@ -5236,7 +5255,7 @@ mod test {
     }
 
     /// Verify that the re-initialization guard takes effect immediately after
-    /// the first initialize() call completes — no transient window during which
+    /// the first initialize() call completes ? no transient window during which
     /// a second initialize could partially succeed.
     #[test]
     fn reinitialization_guard_active_immediately() {
@@ -5356,7 +5375,7 @@ mod test {
         .is_err());
     }
 
-    // ── genesis identity (issue #192) ────────────────────────────────────────
+    // ?? genesis identity (issue #192) ????????????????????????????????????????
 
     #[test]
     fn genesis_is_recorded_at_initialization() {
@@ -5426,7 +5445,7 @@ mod test {
         assert_eq!(result, Err(Ok(ContractError::NotInitialized)));
     }
 
-    // ── schema payload size limits (issue #190) ──────────────────────────────
+    // ?? schema payload size limits (issue #190) ??????????????????????????????
 
     #[test]
     fn unset_schema_gets_the_default_payload_limit() {
@@ -6131,7 +6150,7 @@ mod test {
         );
     }
 
-    // ── bounded configuration change history (issue #193) ────────────────────
+    // ?? bounded configuration change history (issue #193) ????????????????????
 
     #[test]
     fn change_history_starts_empty() {
@@ -6232,6 +6251,53 @@ mod test {
 
         assert_eq!(client.get_config_history_cursor(), cursor_before);
         assert_eq!(client.get_config_history(&0, &10).len(), cursor_before);
+    }
+
+    #[test]
+    fn rejected_replacement_cycle_preserves_state_events_and_traversed_ttl() {
+        let (env, client, _admin) = setup();
+        client.approve_schema_version(&1);
+        client.approve_schema_version(&2);
+        client.approve_schema_version(&3);
+
+        env.as_contract(&client.address, || {
+            for (from, to) in [(2u32, 3u32), (3u32, 1u32)] {
+                let key = DataKey::SchemaReplacement(from);
+                env.storage().persistent().set(
+                    &key,
+                    &SchemaReplacementPointer {
+                        pointer_version: 1,
+                        deprecated_version: from,
+                        replacement_version: to,
+                        compatibility: SchemaCompatibility::MigrationRequired,
+                        effective_ledger: env.ledger().sequence(),
+                    },
+                );
+                env.storage().persistent().extend_ttl(&key, 100, 500);
+            }
+        });
+
+        let version_before = client.get_config_version();
+        let events_before = env.events().all().len();
+        let ttl_before = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::SchemaReplacement(2))
+        });
+
+        assert_eq!(
+            client.try_deprecate_schema_to(&1, &2, &SchemaCompatibility::MigrationRequired,),
+            Err(Ok(ContractError::InvalidState))
+        );
+        assert_eq!(client.get_config_version(), version_before);
+        assert_eq!(env.events().all().len(), events_before);
+        assert_eq!(client.get_schema_replacement(&1), None);
+        let ttl_after = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::SchemaReplacement(2))
+        });
+        assert_eq!(ttl_after, ttl_before);
     }
 
     /// Test-only helper mirroring the contract's private `commit` so the
