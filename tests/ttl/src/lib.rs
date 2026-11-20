@@ -34,6 +34,7 @@ mod restoration;
 
 #[cfg(test)]
 mod temporary;
+mod amplification;
 
 /// TTL Expiration and Restoration Boundary Tests
 ///

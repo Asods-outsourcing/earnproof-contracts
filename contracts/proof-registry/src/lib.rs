@@ -7,21 +7,21 @@
 use earnproof_shared::{
     consent_withdrawal_commitment, disclosure_consent_commitment, event_checkpoint,
     is_interface_compatible, AdminTransferState, AdminTransferStatus, ApprovalQuery,
-    ApprovalStatus, ArchivedProofRecord, ConsentWithdrawalRecord, ContractError, DisputeActorClass,
+    ApprovalStatus, ArchivedProofRecord, BatchValidationError, BatchValidationReason,
+    BatchValidationResult, ConsentWithdrawalRecord, ContractError, DisputeActorClass,
     DisputeFilingAnchor, DisputeFilingEligibility, DisputeFilingPolicy, DisputeFilingStatus,
     DisputeRecord, DisputeStatus, EventDomain, EventSequenceRange, EvidenceBundleCommitment,
-    GenesisRecord, InterfaceVersion,
-    MigrationStatus, PauseAcknowledgementRecord, PauseAcknowledgementRole, PauseScope, ProofError,
-    ProofPayloadRecord, ProofPolicyVersions, ProofRecord, ProofRegistrationInput, ProofStatus,
-    ProofValidity, ProofValidityDetails, SchemaPolicy, SchemaRateLimit, SchemaRateLimitUsage,
-    SubjectNullifier,
-    TtlStatus, UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord,
-    UpgradeHistoryRecord, UpgradeReceipt, ADMIN_TRANSFER_EXPIRY_LEDGERS, CONFIG_DIGEST_VERSION,
-    CONSENT_WITHDRAWAL_REASON_SUBJECT_REQUEST, CONSENT_WITHDRAWAL_VERSION, EVENT_RANGE_VERSION,
-    ISSUER_POLICY_ENCODING_VERSION, MAX_CONSENT_WITHDRAWAL_PAGE, MAX_CONSENT_WITHDRAWAL_REASON,
+    GenesisRecord, InterfaceVersion, MigrationStatus, PauseAcknowledgementRecord,
+    PauseAcknowledgementRole, PauseScope, ProofError, ProofPayloadRecord, ProofPolicyVersions,
+    ProofRecord, ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails,
+    SchemaPolicy, SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier, TtlStatus,
+    UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord, UpgradeHistoryRecord,
+    UpgradeReceipt, ADMIN_TRANSFER_EXPIRY_LEDGERS, BATCH_VALIDATION_RESULT_VERSION,
+    CONFIG_DIGEST_VERSION, CONSENT_WITHDRAWAL_REASON_SUBJECT_REQUEST, CONSENT_WITHDRAWAL_VERSION,
+    EVENT_RANGE_VERSION, EVIDENCE_BUNDLE_COMMITMENT_VERSION, ISSUER_POLICY_ENCODING_VERSION,
+    LEGACY_COMMITMENT_ALGORITHM, MAX_CONSENT_WITHDRAWAL_PAGE, MAX_CONSENT_WITHDRAWAL_REASON,
     MAX_MIGRATION_BATCH, MAX_PAUSE_ACKNOWLEDGEMENT_HISTORY_PAGE, MAX_PROOF_BATCH_SIZE,
-    EVIDENCE_BUNDLE_COMMITMENT_VERSION, LEGACY_COMMITMENT_ALGORITHM, MIGRATION_STATUS_VERSION,
-    PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
+    MIGRATION_STATUS_VERSION, PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
     TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS,
     UPGRADE_TIMELOCK_LEDGERS,
 };
@@ -121,6 +121,8 @@ enum DataKey {
     /// Monotonic epoch, advanced once per externally visible proof mutation
     /// (registration, revocation, supersession, or archival change).
     RegistryEpoch,
+    /// Greatest ledger timestamp observed by time-gated proof logic.
+    ObservedTimestamp,
     /// Bounded auxiliary-payload metadata for a proof registered with a
     /// payload (length and commitment hash only — never the raw bytes).
     ProofPayloadMeta(BytesN<32>),
@@ -458,7 +460,7 @@ impl ProofRegistryContract {
             return Err(ProofError::ProofAlreadyRevoked);
         }
 
-        if record.expires_at < env.ledger().timestamp() {
+        if record.expires_at < Self::monotonic_timestamp(&env) {
             return Err(ProofError::ProofExpired);
         }
 
@@ -523,7 +525,7 @@ impl ProofRegistryContract {
         if record.status == ProofStatus::Revoked {
             return Err(ProofError::ProofAlreadyRevoked);
         }
-        if env.ledger().timestamp() > record.expires_at {
+        if Self::monotonic_timestamp(&env) > record.expires_at {
             return Err(ProofError::ProofExpired);
         }
         Self::require_auth(&record.issuer_address);
@@ -1418,9 +1420,7 @@ impl ProofRegistryContract {
             .instance()
             .get(&DataKey::PauseAcknowledgementCount)
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(ContractError::InvalidState);
-        }
+        let next_sequence = sequence.checked_add(1).ok_or(ContractError::InvalidState)?;
         let record = PauseAcknowledgementRecord {
             record_version: 1,
             sequence,
@@ -1435,7 +1435,7 @@ impl ProofRegistryContract {
         env.storage().persistent().set(&history_key, &record);
         env.storage()
             .instance()
-            .set(&DataKey::PauseAcknowledgementCount, &(sequence + 1));
+            .set(&DataKey::PauseAcknowledgementCount, &next_sequence);
         for key in [&hash_key, &history_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -1565,7 +1565,7 @@ impl ProofRegistryContract {
             return Err(ProofError::InvalidSchemaVersion);
         }
 
-        if expires_at <= env.ledger().timestamp() {
+        if expires_at <= Self::monotonic_timestamp(&env) {
             return Err(ProofError::ProofExpired);
         }
 
@@ -1636,7 +1636,7 @@ impl ProofRegistryContract {
         // it is deterministic and non-forgeable by the caller. The proof
         // record and its timing are written together in a single persistent
         // `set`, so a proof never exists without its creation metadata.
-        let now = env.ledger().timestamp();
+        let now = Self::monotonic_timestamp(&env);
         let created_ledger = env.ledger().sequence();
         let record = ProofRecord {
             proof_id_hash: proof_id_hash.clone(),
@@ -1835,7 +1835,7 @@ impl ProofRegistryContract {
             return Err(ProofError::InvalidSchemaVersion);
         }
 
-        if expires_at <= env.ledger().timestamp() {
+        if expires_at <= Self::monotonic_timestamp(&env) {
             return Err(ProofError::ProofExpired);
         }
 
@@ -1874,7 +1874,7 @@ impl ProofRegistryContract {
         let sequence_number = Self::next_issuer_proof_sequence(&env, &issuer_address)?;
         Self::consume_issuer_proof_capacity(&env, &issuer_address)?;
 
-        let now = env.ledger().timestamp();
+        let now = Self::monotonic_timestamp(&env);
         let created_ledger = env.ledger().sequence();
         let record = ProofRecord {
             proof_id_hash: proof_id_hash.clone(),
@@ -2042,7 +2042,7 @@ impl ProofRegistryContract {
             return Err(ProofError::ProofAlreadyRegistered);
         }
 
-        let now = env.ledger().timestamp();
+        let now = Self::monotonic_timestamp(&env);
         let created_ledger = env.ledger().sequence();
         Self::consume_schema_rate_limit(&env, &protocol_client, schema_version)?;
         let sequence_number = Self::next_issuer_proof_sequence(&env, &issuer_address)?;
@@ -2089,6 +2089,20 @@ impl ProofRegistryContract {
     ///
     /// Emits one [`ProofRegisteredInBatch`] event per registered proof, in
     /// input order.
+    pub fn preflight_register_proofs_batch(
+        env: Env,
+        entries: Vec<ProofRegistrationInput>,
+    ) -> Result<BatchValidationResult, ProofError> {
+        let protocol_config =
+            Self::get_protocol_config(env.clone()).map_err(|_| ProofError::ProofNotFound)?;
+        let protocol_client = ProtocolConfigContractClient::new(&env, &protocol_config);
+        Ok(Self::registration_batch_validation(
+            &env,
+            &protocol_client,
+            &entries,
+        ))
+    }
+
     pub fn register_proofs_batch(
         env: Env,
         entries: Vec<ProofRegistrationInput>,
@@ -2100,6 +2114,10 @@ impl ProofRegistryContract {
         let len = entries.len();
         if len == 0 || len > MAX_PROOF_BATCH_SIZE {
             return Err(ProofError::InvalidBatchSize);
+        }
+
+        if Self::duplicate_registration_entry(&entries).is_some() {
+            return Err(ProofError::DuplicateBatchElement);
         }
 
         let protocol_config =
@@ -2642,6 +2660,13 @@ impl ProofRegistryContract {
         Self::revoke_batch(env, proof_id_hashes, true)
     }
 
+    pub fn preflight_revoke_proofs_batch(
+        env: Env,
+        proof_id_hashes: Vec<BytesN<32>>,
+    ) -> BatchValidationResult {
+        Self::revocation_batch_validation(&env, &proof_id_hashes)
+    }
+
     /// Records an issuer-authorized, hash-only disclosure-consent receipt.
     /// Multiple receipts are indexed independently by their commitment hash.
     pub fn commit_disclosure_consent(
@@ -2806,7 +2831,8 @@ impl ProofRegistryContract {
     pub fn is_valid_proof(env: Env, proof_id_hash: BytesN<32>) -> bool {
         match Self::get_proof(env.clone(), proof_id_hash) {
             Ok(record) => {
-                Self::compute_validity(env.ledger().timestamp(), &record) == ProofValidity::Active
+                Self::compute_validity(Self::monotonic_timestamp(&env), &record)
+                    == ProofValidity::Active
             }
             Err(_) => false,
         }
@@ -2817,7 +2843,7 @@ impl ProofRegistryContract {
     /// collapses all but "active" to `false`.
     pub fn get_proof_validity(env: Env, proof_id_hash: BytesN<32>) -> ProofValidity {
         match Self::get_proof(env.clone(), proof_id_hash) {
-            Ok(record) => Self::compute_validity(env.ledger().timestamp(), &record),
+            Ok(record) => Self::compute_validity(Self::monotonic_timestamp(&env), &record),
             Err(_) => ProofValidity::NotFound,
         }
     }
@@ -2864,7 +2890,7 @@ impl ProofRegistryContract {
             return ProofValidity::Revoked;
         }
 
-        if env.ledger().timestamp() > record.expires_at {
+        if Self::monotonic_timestamp(&env) > record.expires_at {
             return ProofValidity::Expired;
         }
 
@@ -3177,8 +3203,8 @@ impl ProofRegistryContract {
         proof_id_hash: BytesN<32>,
     ) -> Result<ProofValidityDetails, ProofError> {
         let record = Self::get_proof(env.clone(), proof_id_hash)?;
-        let is_valid =
-            record.status == ProofStatus::Active && env.ledger().timestamp() <= record.expires_at;
+        let is_valid = record.status == ProofStatus::Active
+            && Self::monotonic_timestamp(&env) <= record.expires_at;
         let revoked = record.status == ProofStatus::Revoked;
         // Timing is reported only for a revoked proof, so an active proof never
         // exposes a fabricated revocation time.
@@ -3959,6 +3985,18 @@ impl ProofRegistryContract {
             }
         }
 
+        // Reserve the history index before any upgrade state is changed. A
+        // saturated counter must fail atomically rather than committing the
+        // new version without an indexable history record.
+        let history_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeHistoryCount)
+            .unwrap_or(0);
+        let next_history_count = history_count
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("upgrade history overflow: reached maximum"));
+
         env.storage().persistent().remove(&key);
         env.storage()
             .instance()
@@ -4013,12 +4051,6 @@ impl ProofRegistryContract {
         env.storage().instance().remove(&DataKey::MigrationStatus);
         Self::extend_instance_ttl(env.clone());
 
-        let history_count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeHistoryCount)
-            .unwrap_or(0);
-
         let history_record = UpgradeHistoryRecord {
             old_wasm_hash,
             new_wasm_hash: wasm_hash.clone(),
@@ -4040,7 +4072,7 @@ impl ProofRegistryContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::UpgradeHistoryCount, &(history_count + 1));
+            .set(&DataKey::UpgradeHistoryCount, &next_history_count);
 
         ContractUpgraded {
             new_wasm_hash: wasm_hash,
@@ -4241,6 +4273,18 @@ impl ProofRegistryContract {
         Ok(())
     }
 
+    fn monotonic_timestamp(env: &Env) -> u64 {
+        let current = env.ledger().timestamp();
+        let observed: Option<u64> = env.storage().instance().get(&DataKey::ObservedTimestamp);
+        let effective = current.max(observed.unwrap_or(current));
+        if observed != Some(effective) {
+            env.storage()
+                .instance()
+                .set(&DataKey::ObservedTimestamp, &effective);
+        }
+        effective
+    }
+
     fn set_revoked(
         env: Env,
         proof_id_hash: BytesN<32>,
@@ -4283,7 +4327,7 @@ impl ProofRegistryContract {
         }
 
         record.status = ProofStatus::Revoked;
-        let revoked_at = env.ledger().timestamp();
+        let revoked_at = Self::monotonic_timestamp(&env);
         let revoked_ledger = env.ledger().sequence();
         record.revoked_at = revoked_at;
         record.revoked_ledger = revoked_ledger;
@@ -4358,6 +4402,10 @@ impl ProofRegistryContract {
         let len = proof_id_hashes.len();
         if len == 0 || len > MAX_PROOF_BATCH_SIZE {
             return Err(ProofError::InvalidBatchSize);
+        }
+
+        if Self::duplicate_proof_id(&proof_id_hashes).is_some() {
+            return Err(ProofError::DuplicateBatchElement);
         }
 
         if let Ok(protocol_config) = Self::get_protocol_config(env.clone()) {
@@ -4439,6 +4487,117 @@ impl ProofRegistryContract {
         }
 
         Ok(())
+    }
+
+    fn invalid_batch(
+        index: u32,
+        related_index: u32,
+        reason: BatchValidationReason,
+    ) -> BatchValidationResult {
+        BatchValidationResult::Invalid(BatchValidationError {
+            version: BATCH_VALIDATION_RESULT_VERSION,
+            index,
+            related_index,
+            reason,
+        })
+    }
+
+    fn duplicate_registration_entry(entries: &Vec<ProofRegistrationInput>) -> Option<(u32, u32)> {
+        for index in 0..entries.len() {
+            let current = entries.get(index).expect("bounded index").proof_id_hash;
+            for first in 0..index {
+                if entries.get(first).expect("bounded index").proof_id_hash == current {
+                    return Some((index, first));
+                }
+            }
+        }
+        None
+    }
+
+    fn duplicate_proof_id(proof_ids: &Vec<BytesN<32>>) -> Option<(u32, u32)> {
+        for index in 0..proof_ids.len() {
+            let current = proof_ids.get(index).expect("bounded index");
+            for first in 0..index {
+                if proof_ids.get(first).expect("bounded index") == current {
+                    return Some((index, first));
+                }
+            }
+        }
+        None
+    }
+
+    fn registration_batch_validation(
+        env: &Env,
+        protocol: &ProtocolConfigContractClient,
+        entries: &Vec<ProofRegistrationInput>,
+    ) -> BatchValidationResult {
+        if entries.is_empty() {
+            return Self::invalid_batch(0, 0, BatchValidationReason::Empty);
+        }
+        if entries.len() > MAX_PROOF_BATCH_SIZE {
+            return Self::invalid_batch(
+                MAX_PROOF_BATCH_SIZE,
+                MAX_PROOF_BATCH_SIZE,
+                BatchValidationReason::TooLarge,
+            );
+        }
+        if let Some((index, first)) = Self::duplicate_registration_entry(entries) {
+            return Self::invalid_batch(index, first, BatchValidationReason::DuplicateIdentifier);
+        }
+        for index in 0..entries.len() {
+            let entry = entries.get(index).expect("bounded index");
+            if entry.schema_version == 0 {
+                return Self::invalid_batch(
+                    index,
+                    index,
+                    BatchValidationReason::InvalidSchemaVersion,
+                );
+            }
+            if entry.expires_at <= env.ledger().timestamp() {
+                return Self::invalid_batch(index, index, BatchValidationReason::Expired);
+            }
+            if !protocol.is_schema_version_approved(&entry.schema_version) {
+                return Self::invalid_batch(index, index, BatchValidationReason::UnsupportedSchema);
+            }
+        }
+        BatchValidationResult::Valid
+    }
+
+    fn revocation_batch_validation(
+        env: &Env,
+        proof_ids: &Vec<BytesN<32>>,
+    ) -> BatchValidationResult {
+        if proof_ids.is_empty() {
+            return Self::invalid_batch(0, 0, BatchValidationReason::Empty);
+        }
+        if proof_ids.len() > MAX_PROOF_BATCH_SIZE {
+            return Self::invalid_batch(
+                MAX_PROOF_BATCH_SIZE,
+                MAX_PROOF_BATCH_SIZE,
+                BatchValidationReason::TooLarge,
+            );
+        }
+        if let Some((index, first)) = Self::duplicate_proof_id(proof_ids) {
+            return Self::invalid_batch(index, first, BatchValidationReason::DuplicateIdentifier);
+        }
+        for index in 0..proof_ids.len() {
+            let proof_id = proof_ids.get(index).expect("bounded index");
+            let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, ProofRecord>(&DataKey::Proof(proof_id))
+            else {
+                return Self::invalid_batch(index, index, BatchValidationReason::ProofNotFound);
+            };
+            if record.status == ProofStatus::Revoked {
+                return Self::invalid_batch(
+                    index,
+                    index,
+                    BatchValidationReason::ProofAlreadyRevoked,
+                );
+            }
+        }
+        BatchValidationResult::Valid
     }
 
     fn read_dispute(env: &Env, proof_id_hash: &BytesN<32>) -> Option<DisputeRecord> {
@@ -6840,7 +6999,10 @@ mod test {
 
     // ── bounded batch proof registration ─────────────────────────────────────
 
-    use earnproof_shared::{disclosure_consent_commitment, ProofRegistrationInput};
+    use earnproof_shared::{
+        disclosure_consent_commitment, BatchValidationError, BatchValidationReason,
+        BatchValidationResult, ProofRegistrationInput, BATCH_VALIDATION_RESULT_VERSION,
+    };
 
     fn batch_input(env: &Env, seed: u8, expires_at: u64) -> ProofRegistrationInput {
         ProofRegistrationInput {
@@ -6979,8 +7141,17 @@ mod test {
         batch.push_back(batch_input(&env, 2, 2_000));
         batch.push_back(batch_input(&env, 1, 2_000)); // duplicate of the first
 
+        assert_eq!(
+            client.preflight_register_proofs_batch(&batch),
+            BatchValidationResult::Invalid(BatchValidationError {
+                version: BATCH_VALIDATION_RESULT_VERSION,
+                index: 2,
+                related_index: 0,
+                reason: BatchValidationReason::DuplicateIdentifier,
+            })
+        );
         let result = client.try_register_proofs_batch(&batch, &issuer);
-        assert_eq!(result, Err(Ok(ProofError::ProofAlreadyRegistered)));
+        assert_eq!(result, Err(Ok(ProofError::DuplicateBatchElement)));
 
         // Atomicity: even the entries that would have succeeded (seed 1, 2)
         // must not have been committed.
@@ -7670,8 +7841,17 @@ mod test {
         );
 
         let batch = ids(&env, &[1, 2, 1]); // duplicate of the first
+        assert_eq!(
+            client.preflight_revoke_proofs_batch(&batch),
+            BatchValidationResult::Invalid(BatchValidationError {
+                version: BATCH_VALIDATION_RESULT_VERSION,
+                index: 2,
+                related_index: 0,
+                reason: BatchValidationReason::DuplicateIdentifier,
+            })
+        );
         let result = client.try_revoke_proofs_batch(&batch);
-        assert_eq!(result, Err(Ok(ProofError::ProofAlreadyRevoked)));
+        assert_eq!(result, Err(Ok(ProofError::DuplicateBatchElement)));
 
         // Atomicity: even the entries that would have succeeded must not be committed.
         assert!(!client.is_revoked(&bytes(&env, 1)));
