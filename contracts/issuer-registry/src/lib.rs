@@ -1914,9 +1914,9 @@ impl IssuerRegistryContract {
             .persistent()
             .get(&DataKey::CompromisedSigningKeyCount(issuer_id.clone()))
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(IssuerError::InvalidTransition);
-        }
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
         let record = CompromisedSigningKeyRecord {
             record_version: 1,
             issuer_id_hash: issuer_id.clone(),
@@ -1931,7 +1931,7 @@ impl IssuerRegistryContract {
         let count_key = DataKey::CompromisedSigningKeyCount(issuer_id.clone());
         env.storage().persistent().set(&marker, &record);
         env.storage().persistent().set(&history_key, &record);
-        env.storage().persistent().set(&count_key, &(sequence + 1));
+        env.storage().persistent().set(&count_key, &next_sequence);
         for key in [&marker, &history_key, &count_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -1945,9 +1945,6 @@ impl IssuerRegistryContract {
         if pending_matches {
             env.storage().persistent().remove(&pending_key);
         }
-        let lifecycle_sequence =
-            Self::checked_signing_key_sequence(env.clone(), issuer_id.clone(), 1)
-                .unwrap_or(u64::from(sequence + 1));
         let _ = Self::append_signing_key_transition(
             env.clone(),
             issuer_id.clone(),
@@ -2453,6 +2450,19 @@ impl IssuerRegistryContract {
         }
         Self::require_auth(&pending.new_address);
 
+        // Reserve both monotonic values before changing the address indexes.
+        // Any overflow therefore leaves the pending nomination and issuer
+        // record untouched.
+        let count_key = DataKey::RotationCount(issuer_id_hash.clone());
+        let rotation_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let next_rotation_count = rotation_count
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
+        let current_epoch = Self::get_issuer_epoch(env.clone());
+        current_epoch
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
+
         let old_address = record.issuer_address.clone();
         env.storage()
             .persistent()
@@ -2478,9 +2488,6 @@ impl IssuerRegistryContract {
         Self::extend_issuer_key_ttl(env.clone(), &issuer_key);
         Self::extend_address_ttl(env.clone(), pending.new_address.clone());
 
-        let count_key = DataKey::RotationCount(issuer_id_hash.clone());
-        let rotation_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
         let rotation_record = RotationRecord {
             old_address: old_address.clone(),
             new_address: pending.new_address.clone(),
@@ -2494,7 +2501,7 @@ impl IssuerRegistryContract {
             .set(&history_key, &rotation_record);
         env.storage()
             .persistent()
-            .set(&count_key, &(rotation_count + 1));
+            .set(&count_key, &next_rotation_count);
         Self::extend_issuer_key_ttl(env.clone(), &history_key);
         Self::extend_issuer_key_ttl(env.clone(), &count_key);
 
@@ -5670,6 +5677,45 @@ mod test {
             Err(Ok(IssuerError::InvalidTransition))
         );
         assert!(client.get_active_issuer_signing_key(&issuer_id).is_some());
+    }
+
+    #[test]
+    fn compromised_key_sequence_accepts_max_minus_one_and_rejects_max_atomically() {
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 0x6A);
+        client.register_issuer(
+            &issuer_id,
+            &Address::from_str(&env, ISSUER_ONE),
+            &bytes(&env, 2),
+            &bytes(&env, 99),
+        );
+        let first = bytes(&env, 0x6B);
+        let second = bytes(&env, 0x6C);
+        client.propose_issuer_signing_key(&issuer_id, &first, &1);
+        client.activate_issuer_signing_key(&issuer_id);
+        client.propose_issuer_signing_key(&issuer_id, &second, &1);
+        client.activate_issuer_signing_key(&issuer_id);
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(
+                &DataKey::CompromisedSigningKeyCount(issuer_id.clone()),
+                &(u32::MAX - 1),
+            );
+        });
+        let record =
+            client.mark_signing_key_compromised(&issuer_id, &first, &1, &bytes(&env, 0x6D));
+        assert_eq!(record.sequence, u32::MAX - 1);
+
+        let events_before = env.events().all().len();
+        assert_eq!(
+            client.try_mark_signing_key_compromised(&issuer_id, &second, &1, &bytes(&env, 0x6E)),
+            Err(Ok(IssuerError::SequenceOverflow))
+        );
+        assert!(client.get_active_issuer_signing_key(&issuer_id).is_some());
+        assert!(client
+            .get_compromised_signing_key(&issuer_id, &second, &1)
+            .is_none());
+        assert_eq!(env.events().all().len(), events_before);
     }
 
     #[test]
