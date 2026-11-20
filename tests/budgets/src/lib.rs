@@ -1125,3 +1125,6 @@ mod tests {
         assert_budget(&env, "regression_test", 300_000, 1);
     }
 }
+
+#[cfg(test)]
+mod storage_footprint;
