@@ -19,9 +19,10 @@ pub mod deployment_identity;
 pub mod storage_layout;
 
 pub use capabilities::{
-    capabilities_are_additive, capabilities_are_valid, capability_bit, capability_report,
-    has_capability, ContractCapabilities, CAPABILITY_BITMAP_VERSION, ISSUER_REGISTRY_CAPABILITIES,
-    PROOF_REGISTRY_CAPABILITIES, PROTOCOL_CONFIG_CAPABILITIES,
+    capabilities_are_additive, capabilities_are_valid, capability_bit,
+    capability_report, capability_transition_is_allowed, classify_capability_transition,
+    has_capability, CapabilityTransition, ContractCapabilities, CAPABILITY_BITMAP_VERSION,
+    ISSUER_REGISTRY_CAPABILITIES, PROOF_REGISTRY_CAPABILITIES, PROTOCOL_CONFIG_CAPABILITIES,
 };
 pub use decommission::{
     can_finalize_decommission, decommission_phase_permits_mutation, grace_end_ledger,
@@ -635,7 +636,7 @@ fn address_bytes(address: &Address) -> [u8; STRKEY_ADDRESS_LEN] {
 // byte 'G' + 32 zero payload bytes + a real CRC16/XMODEM checksum over
 // those 33 bytes, base32-encoded. The checksum is NOT itself all zero bits
 // (a correct checksum over an all-zero payload is not the all-zero
-// checksum), so this string does not end in all 'A's — comparing the
+// checksum), so this string does not end in all 'A's ? comparing the
 // full string against this one known-correct value is the only way to
 // recognize it; a pattern check like "G followed by all A's" would (and
 // previously did) silently never match a real, correctly-checksummed
@@ -1123,20 +1124,20 @@ pub enum ProofError {
     SchemaVersionNotApproved = 305,
     InvalidAddress = 306,
     // Separated precondition errors (307-310)
-    /// Contract is paused — proof registration is temporarily disabled.
+    /// Contract is paused ? proof registration is temporarily disabled.
     /// Recovery: monitor for unpause event before retrying.
     ContractPaused = 307,
     /// Issuer account is not active or not authorized to register proofs.
-    /// Distinct from authorization failure — the issuer exists but is inactive.
+    /// Distinct from authorization failure ? the issuer exists but is inactive.
     /// Recovery: contact platform to activate the issuer account.
     IssuerInactive = 308,
     /// The proof schema identifier is not supported or not registered.
-    /// Distinct from malformed input — the schema reference is well-formed
+    /// Distinct from malformed input ? the schema reference is well-formed
     /// but unknown to this contract.
     /// Recovery: check supported schemas via get_supported_schemas().
     UnsupportedSchema = 309,
-    /// Proof input data is malformed — fails format or size validation.
-    /// Distinct from unsupported schema — the input itself is invalid.
+    /// Proof input data is malformed ? fails format or size validation.
+    /// Distinct from unsupported schema ? the input itself is invalid.
     /// Recovery: validate input against the schema before resubmitting.
     MalformedInput = 310,
     /// The proof registry has reached its configured capacity.
@@ -1155,7 +1156,7 @@ pub enum ProofError {
     InvalidActivationTime = 312,
     /// `open_dispute` was called for a proof that already has an `Open`
     /// dispute. Recovery: withdraw, resolve, or reject the existing dispute
-    /// before opening a new one — retrying the identical request will not
+    /// before opening a new one ? retrying the identical request will not
     /// help, since the dispute is cleared by a different call, not by this
     /// one succeeding on its own.
     DisputeAlreadyOpen = 313,
@@ -1209,6 +1210,9 @@ pub enum ProofError {
     EvidenceBundleAlreadyCommitted = 335,
     /// The proof schema does not permit evidence bundle commitments.
     EvidenceBundlesNotEnabled = 336,
+    /// A mutating batch repeats an identifier already present earlier in the
+    /// same request. Recovery: remove the duplicate and resubmit the batch.
+    DuplicateBatchElement = 337,
 }
 
 /// Versioned asset identifier accepted by context-aware proof registration.
@@ -1436,7 +1440,7 @@ pub fn optional_subject_pseudonym_commitment(commitment: &BytesN<32>) -> Option<
 
 /// Fixed capacity of the protocol-config change-history ring. Once this many
 /// entries have been recorded, the oldest entry is overwritten by the next
-/// append — rollover is deterministic rather than unbounded growth.
+/// append ? rollover is deterministic rather than unbounded growth.
 pub const CONFIG_HISTORY_CAPACITY: u32 = 32;
 
 /// Maximum number of entries a single `get_config_history` call may return,
@@ -1446,7 +1450,7 @@ pub const MAX_CONFIG_HISTORY_PAGE: u32 = 20;
 
 /// Category of a recorded protocol-config change. Distinct from the raw
 /// parameter value: history entries carry only this tag, a commitment to the
-/// changed value, and version/ledger metadata — never the sensitive value
+/// changed value, and version/ledger metadata ? never the sensitive value
 /// itself.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1758,7 +1762,7 @@ pub struct PauseAcknowledgementRecord {
 
 pub const MAX_PAUSE_ACKNOWLEDGEMENT_HISTORY_PAGE: u32 = 20;
 
-// ── governed history retention (issue #298) ────────────────────────────────
+// ?? governed history retention (issue #298) ????????????????????????????????
 
 /// Encoding version of [`HistoryRetention`] and [`HistoryRetentionState`].
 pub const HISTORY_RETENTION_VERSION: u32 = 1;
@@ -1848,7 +1852,7 @@ pub const fn oldest_retained_sequence(next_sequence: u32, max_entries: u32, prun
     }
 }
 
-// ── event sequence checkpoint ranges (issue #299) ──────────────────────────
+// ?? event sequence checkpoint ranges (issue #299) ??????????????????????????
 
 /// Encoding version of [`EventSequenceRange`].
 pub const EVENT_RANGE_VERSION: u32 = 1;
@@ -1892,7 +1896,7 @@ pub const fn event_checkpoint(latest_emitted: u64) -> u64 {
     latest_emitted - latest_emitted % EVENT_CHECKPOINT_INTERVAL
 }
 
-// ── disclosure consent withdrawal records (issue #301) ─────────────────────
+// ?? disclosure consent withdrawal records (issue #301) ?????????????????????
 
 /// Encoding version of [`ConsentWithdrawalRecord`] and its commitment.
 pub const CONSENT_WITHDRAWAL_VERSION: u32 = 1;
@@ -1955,7 +1959,7 @@ pub fn consent_withdrawal_commitment(
     env.crypto().sha256(&payload).to_bytes()
 }
 
-// ── proof policy version summaries (issue #300) ────────────────────────────
+// ?? proof policy version summaries (issue #300) ????????????????????????????
 
 /// Encoding version of [`ProofPolicyVersions`].
 pub const PROOF_POLICY_VERSIONS_VERSION: u32 = 1;
@@ -2027,7 +2031,7 @@ pub enum ProofStatus {
 /// Stores temporal metadata for an upgrade approval.
 ///
 /// # Timing invariants
-/// - `created_at` ≤ `earliest_execution` ≤ `expires_at`
+/// - `created_at` ? `earliest_execution` ? `expires_at`
 /// - execution is rejected before `earliest_execution`
 /// - execution is rejected at or after `expires_at`
 /// - re-approval resets ALL three fields (no stale reuse)
@@ -2299,7 +2303,7 @@ pub struct ProofRecord {
     /// Ledger timestamp at or after which this proof is considered active.
     /// `0` means the proof was registered without a delay and is active
     /// immediately (subject to `status` and `expires_at` as before). This
-    /// field is fixed at registration and is never mutated afterward — there
+    /// field is fixed at registration and is never mutated afterward ? there
     /// is no operation that moves it, earlier or later.
     pub activates_at: u64,
 }
@@ -2380,6 +2384,43 @@ pub struct ProofRegistrationInput {
     pub proof_type: BytesN<32>,
 }
 
+/// Encoding version for bounded batch preflight responses.
+pub const BATCH_VALIDATION_RESULT_VERSION: u32 = 1;
+
+/// Stable, non-sensitive reason codes returned by batch preflight queries.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BatchValidationReason {
+    Empty,
+    TooLarge,
+    DuplicateIdentifier,
+    InvalidSchemaVersion,
+    Expired,
+    UnsupportedSchema,
+    ProofNotFound,
+    ProofAlreadyRevoked,
+}
+
+/// Location and reason for one rejected batch. No input value is echoed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchValidationError {
+    pub version: u32,
+    pub index: u32,
+    /// First occurrence for duplicate identifiers; equal to `index` otherwise.
+    pub related_index: u32,
+    pub reason: BatchValidationReason,
+}
+
+/// Bounded structured preflight result. An enum avoids optional user-defined
+/// values in contract XDR while preserving an explicit valid state.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BatchValidationResult {
+    Valid,
+    Invalid(BatchValidationError),
+}
+
 /// Lifecycle state of a proof dispute. Terminal once `Withdrawn`, `Resolved`,
 /// or `Rejected`: none of those transitions back to `Open`, and a new
 /// dispute can only be opened once the previous one has reached one of them.
@@ -2431,7 +2472,7 @@ pub struct DisputeRecord {
     pub opened_by: Address,
     pub opened_by_class: DisputeActorClass,
     pub opened_at: u64,
-    /// Address that produced the current `status` — the opener while still
+    /// Address that produced the current `status` ? the opener while still
     /// `Open`, or whoever withdrew/resolved/rejected it.
     pub updated_by: Address,
     pub updated_by_class: DisputeActorClass,
@@ -2513,7 +2554,7 @@ pub struct UpgradeHistoryRecord {
     pub ledger_timestamp: u64,
     pub upgraded_by: Address,
 }
-// ── Upgrade Approval Metadata ──────────────────────────────────────────────────
+// ?? Upgrade Approval Metadata ??????????????????????????????????????????????????
 // Metadata for an upgrade approval, exposed for off-chain verification.
 //
 // This is the single shared structure used across all contracts that
@@ -2522,7 +2563,7 @@ pub struct UpgradeHistoryRecord {
 //
 // # Off-chain verification use cases
 // - Verify an upgrade plan matches the approved hash and version
-// - Check the approval window (creation → expiry) to assess staleness
+// - Check the approval window (creation ? expiry) to assess staleness
 // - Confirm the execution ledger matches when approval was consumed
 // - Audit which approver authorized the upgrade
 
@@ -2561,7 +2602,7 @@ pub enum ApprovalStatus {
     /// Approval is valid and within its window.
     Active,
 
-    /// Approval was used — upgrade has been executed.
+    /// Approval was used ? upgrade has been executed.
     Executed,
 
     /// Approval was explicitly revoked before execution.
@@ -2576,11 +2617,11 @@ pub enum ApprovalStatus {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApprovalQuery {
-    /// Approval exists — metadata included.
+    /// Approval exists ? metadata included.
     Found(UpgradeApprovalMetadata),
 
     /// No approval record exists for this hash.
-    /// Distinct from Revoked — the approval never existed or was pruned.
+    /// Distinct from Revoked ? the approval never existed or was pruned.
     NotFound,
 
     /// Approval existed but was explicitly revoked.
@@ -2588,7 +2629,7 @@ pub enum ApprovalQuery {
     Revoked(UpgradeApprovalMetadata),
 }
 
-// ── Shared Test Utilities ──────────────────────────────────────────────────────
+// ?? Shared Test Utilities ??????????????????????????????????????????????????????
 // These utilities provide common patterns for initialization adversarial testing
 // across all contracts, ensuring consistent test coverage for re-initialization
 // guards, invalid dependencies, and state/event immutability on failure.
